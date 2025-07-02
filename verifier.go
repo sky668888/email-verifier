@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"time"
-
 	"github.com/sky668888/email-verifier/smtp"
 )
 
@@ -19,34 +18,43 @@ type Verifier struct {
 	schedule             *schedule                  // schedule represents a job schedule
 	proxyURI             string                     // use a SOCKS5 proxy to verify the email,
 	apiVerifiers         map[string]smtpAPIVerifier // currently support gmail & yahoo, further contributions are welcomed.
-
+	smtpDialer *smtp.Dialer // <-- 新增字段：支持代理
+	// Timeouts
 	connectTimeout   time.Duration // Timeout for establishing connections
 	operationTimeout time.Duration // Timeout for SMTP operations (e.g., EHLO, MAIL FROM, etc.)
-	smtpDialer       *smtp.Dialer   // 自定义 Dialer，支持 SOCKS5 代理
+	
 }
-
+type Dialer = smtp.Dialer // 确保引入正确类型
 // Result is the result of Email Verification
 type Result struct {
-	Email        string    `json:"email"`
-	Reachable    string    `json:"reachable"`
-	Syntax       Syntax    `json:"syntax"`
-	SMTP         *SMTP     `json:"smtp"`
-	Gravatar     *Gravatar `json:"gravatar"`
-	Suggestion   string    `json:"suggestion"`
-	Disposable   bool      `json:"disposable"`
-	RoleAccount  bool      `json:"role_account"`
-	Free         bool      `json:"free"`
-	HasMxRecords bool      `json:"has_mx_records"`
+	Email        string    `json:"email"`          // passed email address
+	Reachable    string    `json:"reachable"`      // an enumeration to describe whether the recipient address is real
+	Syntax       Syntax    `json:"syntax"`         // details about the email address syntax
+	SMTP         *SMTP     `json:"smtp"`           // details about the SMTP response of the email
+	Gravatar     *Gravatar `json:"gravatar"`       // whether or not have gravatar for the email
+	Suggestion   string    `json:"suggestion"`     // domain suggestion when domain is misspelled
+	Disposable   bool      `json:"disposable"`     // is this a DEA (disposable email address)
+	RoleAccount  bool      `json:"role_account"`   // is account a role-based account
+	Free         bool      `json:"free"`           // is domain a free email domain
+	HasMxRecords bool      `json:"has_mx_records"` // whether or not MX-Records for the domain
 }
 
+// additional list of disposable domains set via users of this library
 var additionalDisposableDomains map[string]bool = map[string]bool{}
 
+// init loads disposable_domain meta data to disposableSyncDomains which are safe for concurrent use
 func init() {
 	for d := range disposableDomains {
 		disposableSyncDomains.Store(d, struct{}{})
 	}
 }
+func (v *Verifier) EnableSMTPCheckWithDialer(dialer smtp.Dialer) *Verifier {
+	v.smtpCheckEnabled = true
+	v.smtpDialer = &dialer
+	return v
+}
 
+// NewVerifier creates a new email verifier
 func NewVerifier() *Verifier {
 	return &Verifier{
 		fromEmail:            defaultFromEmail,
@@ -58,7 +66,9 @@ func NewVerifier() *Verifier {
 	}
 }
 
+// Verify performs address, misc, mx and smtp checks
 func (v *Verifier) Verify(email string) (*Result, error) {
+
 	ret := Result{
 		Email:     email,
 		Reachable: reachableUnknown,
@@ -74,6 +84,7 @@ func (v *Verifier) Verify(email string) (*Result, error) {
 	ret.RoleAccount = v.IsRoleAccount(syntax.Username)
 	ret.Disposable = v.IsDisposable(syntax.Domain)
 
+	// If the domain name is disposable, mx and smtp are not checked.
 	if ret.Disposable {
 		return &ret, nil
 	}
@@ -84,17 +95,16 @@ func (v *Verifier) Verify(email string) (*Result, error) {
 	}
 	ret.HasMxRecords = mx.HasMXRecord
 
-	var smtpResult *SMTP
 	if v.smtpDialer != nil {
-		smtpResult, err = v.CheckSMTPWithDialer(syntax.Domain, syntax.Username, v.smtpDialer)
+		smtp, err = v.CheckSMTPWithDialer(syntax.Domain, syntax.Username, *v.smtpDialer)
 	} else {
-		smtpResult, err = v.CheckSMTP(syntax.Domain, syntax.Username)
+		smtp, err = v.CheckSMTP(syntax.Domain, syntax.Username)
 	}
 	if err != nil {
 		return &ret, err
 	}
-	ret.SMTP = smtpResult
-	ret.Reachable = v.calculateReachable(smtpResult)
+	ret.SMTP = smtp
+	ret.Reachable = v.calculateReachable(smtp)
 
 	if v.gravatarCheckEnabled {
 		gravatar, err := v.CheckGravatar(email)
@@ -110,7 +120,11 @@ func (v *Verifier) Verify(email string) (*Result, error) {
 
 	return &ret, nil
 }
+func (v *Verifier) CheckSMTPWithDialer(domain, username string, dialer smtp.Dialer) (*SMTP, error) {
+	return smtp.CheckWithDialer(domain, username, v.helloName, v.fromEmail, dialer)
+}
 
+// AddDisposableDomains adds additional domains as disposable domains.
 func (v *Verifier) AddDisposableDomains(domains []string) *Verifier {
 	for _, d := range domains {
 		additionalDisposableDomains[d] = true
@@ -119,90 +133,30 @@ func (v *Verifier) AddDisposableDomains(domains []string) *Verifier {
 	return v
 }
 
+// EnableGravatarCheck enables check gravatar,
+// we don't check gravatar by default
 func (v *Verifier) EnableGravatarCheck() *Verifier {
 	v.gravatarCheckEnabled = true
 	return v
 }
 
+// DisableGravatarCheck disables check gravatar,
 func (v *Verifier) DisableGravatarCheck() *Verifier {
 	v.gravatarCheckEnabled = false
 	return v
 }
 
+// EnableSMTPCheck enables check email by smtp,
+// for most ISPs block outgoing SMTP requests through port 25, to prevent spam,
+// we don't check smtp by default
 func (v *Verifier) EnableSMTPCheck() *Verifier {
 	v.smtpCheckEnabled = true
 	return v
 }
 
-func (v *Verifier) EnableSMTPCheckWithDialer(d smtp.Dialer) *Verifier {
-	v.smtpCheckEnabled = true
-	v.smtpDialer = &d
-	return v
-}
-
-func (v *Verifier) DisableSMTPCheck() *Verifier {
-	v.smtpCheckEnabled = false
-	return v
-}
-
-func (v *Verifier) EnableCatchAllCheck() *Verifier {
-	v.catchAllCheckEnabled = true
-	return v
-}
-
-func (v *Verifier) DisableCatchAllCheck() *Verifier {
-	v.catchAllCheckEnabled = false
-	return v
-}
-
-func (v *Verifier) EnableDomainSuggest() *Verifier {
-	v.domainSuggestEnabled = true
-	return v
-}
-
-func (v *Verifier) DisableDomainSuggest() *Verifier {
-	v.domainSuggestEnabled = false
-	return v
-}
-
-func (v *Verifier) EnableAutoUpdateDisposable() *Verifier {
-	v.stopCurrentSchedule()
-	_ = updateDisposableDomains(disposableDataURL)
-	v.schedule = newSchedule(24*time.Hour, updateDisposableDomains, disposableDataURL)
-	v.schedule.start()
-	return v
-}
-
-func (v *Verifier) DisableAutoUpdateDisposable() *Verifier {
-	v.stopCurrentSchedule()
-	return v
-}
-
-func (v *Verifier) FromEmail(email string) *Verifier {
-	v.fromEmail = email
-	return v
-}
-
-func (v *Verifier) HelloName(domain string) *Verifier {
-	v.helloName = domain
-	return v
-}
-
-func (v *Verifier) Proxy(proxyURI string) *Verifier {
-	v.proxyURI = proxyURI
-	return v
-}
-
-func (v *Verifier) ConnectTimeout(timeout time.Duration) *Verifier {
-	v.connectTimeout = timeout
-	return v
-}
-
-func (v *Verifier) OperationTimeout(timeout time.Duration) *Verifier {
-	v.operationTimeout = timeout
-	return v
-}
-
+// EnableAPIVerifier API verifier is activated when EnableAPIVerifier for the target vendor.
+// ** Please know ** that this is a tricky way (but relatively stable) to check if target vendor's email exists.
+// If you use this feature in a production environment, please ensure that you have sufficient backup measures in place, as this may encounter rate limiting or other API issues.
 func (v *Verifier) EnableAPIVerifier(name string) error {
 	switch name {
 	case YAHOO:
@@ -215,6 +169,88 @@ func (v *Verifier) EnableAPIVerifier(name string) error {
 
 func (v *Verifier) DisableAPIVerifier(name string) {
 	delete(v.apiVerifiers, name)
+}
+
+// DisableSMTPCheck disables check email by smtp
+func (v *Verifier) DisableSMTPCheck() *Verifier {
+	v.smtpCheckEnabled = false
+	return v
+}
+
+// EnableCatchAllCheck enables catchAll check by smtp
+// for most ISPs block outgoing catchAll requests through port 25, to prevent spam,
+// we don't check catchAll by default
+func (v *Verifier) EnableCatchAllCheck() *Verifier {
+	v.catchAllCheckEnabled = true
+	return v
+}
+
+// DisableCatchAllCheck disables catchAll check by smtp
+func (v *Verifier) DisableCatchAllCheck() *Verifier {
+	v.catchAllCheckEnabled = false
+	return v
+}
+
+// EnableDomainSuggest will suggest a most similar correct domain when domain misspelled
+func (v *Verifier) EnableDomainSuggest() *Verifier {
+	v.domainSuggestEnabled = true
+	return v
+}
+
+// DisableDomainSuggest will not suggest anything
+func (v *Verifier) DisableDomainSuggest() *Verifier {
+	v.domainSuggestEnabled = false
+	return v
+}
+
+// EnableAutoUpdateDisposable enables update disposable domains automatically
+func (v *Verifier) EnableAutoUpdateDisposable() *Verifier {
+	v.stopCurrentSchedule()
+	// fetch latest disposable domains before next schedule
+	_ = updateDisposableDomains(disposableDataURL)
+	// update disposable domains records daily
+	v.schedule = newSchedule(24*time.Hour, updateDisposableDomains, disposableDataURL)
+	v.schedule.start()
+	return v
+}
+
+// DisableAutoUpdateDisposable stops previously started schedule job
+func (v *Verifier) DisableAutoUpdateDisposable() *Verifier {
+	v.stopCurrentSchedule()
+	return v
+
+}
+
+// FromEmail sets the emails to use in the `MAIL FROM:` smtp command
+func (v *Verifier) FromEmail(email string) *Verifier {
+	v.fromEmail = email
+	return v
+}
+
+// HelloName sets the name to use in the `EHLO:` SMTP command
+func (v *Verifier) HelloName(domain string) *Verifier {
+	v.helloName = domain
+	return v
+}
+
+// Proxy sets a SOCKS5 proxy to verify the email,
+// proxyURI should be in the format: "socks5://user:password@127.0.0.1:1080?timeout=5s".
+// The protocol could be socks5, socks4 and socks4a.
+func (v *Verifier) Proxy(proxyURI string) *Verifier {
+	v.proxyURI = proxyURI
+	return v
+}
+
+// ConnectTimeout sets the timeout for establishing connections.
+func (v *Verifier) ConnectTimeout(timeout time.Duration) *Verifier {
+	v.connectTimeout = timeout
+	return v
+}
+
+// OperationTimeout sets the timeout for SMTP operations (e.g., EHLO, MAIL FROM, etc.).
+func (v *Verifier) OperationTimeout(timeout time.Duration) *Verifier {
+	v.operationTimeout = timeout
+	return v
 }
 
 func (v *Verifier) calculateReachable(s *SMTP) string {
@@ -230,9 +266,9 @@ func (v *Verifier) calculateReachable(s *SMTP) string {
 	return reachableNo
 }
 
+// stopCurrentSchedule stops current running schedule (if exists)
 func (v *Verifier) stopCurrentSchedule() {
 	if v.schedule != nil {
 		v.schedule.stop()
 	}
 }
-
