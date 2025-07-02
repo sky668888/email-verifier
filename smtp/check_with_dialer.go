@@ -6,8 +6,6 @@ import (
 	"net/smtp"
 	"net/url"
 	"strings"
-	"time"
-
 	"golang.org/x/net/proxy"
 )
 
