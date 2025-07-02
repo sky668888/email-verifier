@@ -4,7 +4,9 @@ import (
 	"errors"
 	"net"
 	"net/smtp"
+	"net/url"
 	"strings"
+	"time"
 
 	"golang.org/x/net/proxy"
 )
@@ -19,20 +21,34 @@ func CheckSMTPWithDialer(domain, username string, dialer Dialer) (*SMTPCheckResu
 	// 优先使用优先级高的 MX 服务器
 	mxHost := strings.TrimSuffix(mxRecords[0].Host, ".")
 
-	// 使用代理构建连接器
+	// 构建连接
 	var conn net.Conn
 	if dialer.ProxyAddress != "" {
-		dialSocksProxy, err := proxy.SOCKS5("tcp", dialer.ProxyAddress, nil, proxy.Direct)
+		// 解析 socks5 代理 URI，例如：socks5h://user:pass@host:port
+		proxyURL, err := url.Parse(dialer.ProxyAddress)
 		if err != nil {
 			return &SMTPCheckResult{Deliverable: false}, err
 		}
 
-		conn, err = dialSocksProxy.Dial("tcp", mxHost+":25")
+		auth := &proxy.Auth{}
+		if proxyURL.User != nil {
+			auth.User = proxyURL.User.Username()
+			auth.Password, _ = proxyURL.User.Password()
+		}
+
+		address := proxyURL.Host // host:port
+
+		dialerProxy, err := proxy.SOCKS5("tcp", address, auth, proxy.Direct)
+		if err != nil {
+			return &SMTPCheckResult{Deliverable: false}, err
+		}
+
+		conn, err = dialerProxy.Dial("tcp", mxHost+":25")
 		if err != nil {
 			return &SMTPCheckResult{Deliverable: false}, err
 		}
 	} else {
-		// 无代理，使用标准连接
+		// 无代理连接
 		conn, err = net.DialTimeout("tcp", mxHost+":25", dialer.Timeout)
 		if err != nil {
 			return &SMTPCheckResult{Deliverable: false}, err
@@ -41,30 +57,26 @@ func CheckSMTPWithDialer(domain, username string, dialer Dialer) (*SMTPCheckResu
 
 	defer conn.Close()
 
-	// 构建 SMTP 客户端
+	// SMTP 交互
 	client, err := smtp.NewClient(conn, mxHost)
 	if err != nil {
 		return &SMTPCheckResult{Deliverable: false}, err
 	}
 	defer client.Close()
 
-	// 发送 EHLO
 	host := "localhost"
 	if err = client.Hello(host); err != nil {
 		return &SMTPCheckResult{Deliverable: false}, err
 	}
 
-	// 发送 MAIL FROM
 	if err = client.Mail("tester@" + domain); err != nil {
 		return &SMTPCheckResult{Deliverable: false}, err
 	}
 
-	// 发送 RCPT TO
 	if err = client.Rcpt(username + "@" + domain); err != nil {
 		return &SMTPCheckResult{Deliverable: false}, err
 	}
 
-	// 如果上面都通过，说明邮箱可投递
+	// 邮箱可投递
 	return &SMTPCheckResult{Deliverable: true}, nil
 }
-
