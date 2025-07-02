@@ -46,6 +46,11 @@ func init() {
 		disposableSyncDomains.Store(d, struct{}{})
 	}
 }
+func (v *Verifier) EnableSMTPCheckWithDialer(dialer smtp.Dialer) *Verifier {
+	v.smtpCheckEnabled = true
+	v.smtpDialer = &dialer
+	return v
+}
 
 // NewVerifier creates a new email verifier
 func NewVerifier() *Verifier {
