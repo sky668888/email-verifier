@@ -96,15 +96,17 @@ func (v *Verifier) Verify(email string) (*Result, error) {
 	ret.HasMxRecords = mx.HasMXRecord
 
 	if v.smtpDialer != nil {
-		smtp, err = v.CheckSMTPWithDialer(syntax.Domain, syntax.Username, *v.smtpDialer)
+		
+		smtpRes, err := v.CheckSMTPWithDialer(syntax.Domain, syntax.Username, *v.smtpDialer)
+
 	} else {
 		smtp, err = v.CheckSMTP(syntax.Domain, syntax.Username)
 	}
 	if err != nil {
 		return &ret, err
 	}
-	ret.SMTP = smtp
-	ret.Reachable = v.calculateReachable(smtp)
+	ret.SMTP = smtpRes
+	ret.Reachable = v.calculateReachable(smtpRes)
 
 	if v.gravatarCheckEnabled {
 		gravatar, err := v.CheckGravatar(email)
@@ -121,7 +123,13 @@ func (v *Verifier) Verify(email string) (*Result, error) {
 	return &ret, nil
 }
 func (v *Verifier) CheckSMTPWithDialer(domain, username string, dialer smtp.Dialer) (*SMTP, error) {
-	return smtp.CheckWithDialer(domain, username, v.helloName, v.fromEmail, dialer)
+	result, err := smtp.CheckSMTPWithDialer(domain, username, dialer)
+if err != nil {
+    return nil, err
+}
+return &SMTP{
+    Deliverable: result.Deliverable,
+}, nil
 }
 
 // AddDisposableDomains adds additional domains as disposable domains.
